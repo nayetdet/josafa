@@ -69,10 +69,6 @@ class MusicTask:
         if voice_client and voice_client.is_playing():
             voice_client.stop()
 
-        if guild.id in cls.__tasks and not cls.__tasks[guild.id].done():
-            cls.__tasks[guild.id].cancel()
-            await cls.__tasks[guild.id]
-
     @classmethod
     async def clear(cls, guild: Guild) -> None:
         cls.__queues[guild.id] = asyncio.Queue()
