@@ -1,16 +1,23 @@
 import asyncio
 import discord
+import logging
 from typing import Optional, Dict, Tuple
+from dataclasses import dataclass
 from discord import Guild, VoiceClient
 from discord.ext import commands
 
+@dataclass
+class MusicTaskData:
+    queue: asyncio.Queue[Tuple[commands.Context, str, str, str]]
+    task: Optional[asyncio.Task[None]]
+
 class MusicTask:
-    __queues: Dict[int, asyncio.Queue[Tuple[commands.Context, str, str, str]]] = {}
-    __tasks: Dict[int, asyncio.Task[None]] = {}
+    __data: Dict[int, MusicTaskData] = {}
 
     @classmethod
     async def display(cls, ctx: commands.Context, title: str, thumbnail: str, url: str, on_queue: bool = False) -> None:
-        queue_size: int = cls.__queues[ctx.guild.id].qsize()
+        data: Optional[MusicTaskData] = cls.__data.get(ctx.guild.id)
+        queue_size: int = data.queue.qsize() if data else 0
         embed: discord.Embed = discord.Embed(
             title=title,
             url=url,
@@ -25,43 +32,45 @@ class MusicTask:
     @classmethod
     async def add(cls, ctx: commands.Context, title: str, thumbnail: str, url: str) -> None:
         guild: Guild = ctx.guild
-        if guild.id not in cls.__queues:
-            cls.__queues[guild.id] = asyncio.Queue()
-
-        await cls.__queues[guild.id].put((ctx, title, thumbnail, url))
-        if guild.id not in cls.__tasks or cls.__tasks[guild.id].done():
-            cls.__tasks[guild.id] = asyncio.create_task(cls.play(guild))
+        data: MusicTaskData = cls.__data.setdefault(guild.id, MusicTaskData(queue=asyncio.Queue(), task=None))
+        await data.queue.put((ctx, title, thumbnail, url))
+        if not data.task or data.task.done():
+            data.task = asyncio.create_task(cls.play(guild))
         await cls.display(ctx, title=title, thumbnail=thumbnail, url=url, on_queue=True)
 
     @classmethod
     async def remove(cls, guild: Guild) -> None:
         await cls.clear(guild)
-        if guild.id in cls.__queues:
-            del cls.__queues[guild.id]
-
-        if guild.id in cls.__tasks:
-            del cls.__tasks[guild.id]
+        cls.__data.pop(guild.id, None)
 
     @classmethod
     async def play(cls, guild: Guild) -> None:
-        queue: asyncio.Queue = cls.__queues[guild.id]
-        voice_client: Optional[VoiceClient] = guild.voice_client
-        if not voice_client:
-            return
+        data: MusicTaskData = cls.__data[guild.id]
+        queue: asyncio.Queue = data.queue
 
-        while True:
-            ctx, title, thumbnail, url = await queue.get()
-            if not voice_client or not voice_client.is_connected():
-                queue.task_done()
-                await asyncio.sleep(1)
-                continue
+        try:
+            while True:
+                voice_client: Optional[VoiceClient] = guild.voice_client
+                if not voice_client:
+                    await asyncio.sleep(1)
+                    continue
 
-            voice_client.play(discord.FFmpegPCMAudio(url, before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"))
-            await cls.display(ctx, title=title, thumbnail=thumbnail, url=url, on_queue=False)
-            while voice_client.is_playing():
-                await asyncio.sleep(1)
+                ctx, title, thumbnail, url = await queue.get()
+                try:
+                    voice_client.play(discord.FFmpegPCMAudio(url, before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"))
+                    await cls.display(ctx, title=title, thumbnail=thumbnail, url=url, on_queue=False)
+                    while voice_client.is_playing():
+                        await asyncio.sleep(1)
+                except Exception as e: logging.error(f"[MusicTask] Music playback failed: {e}")
+                finally: queue.task_done()
+        except asyncio.CancelledError as e:
+            voice_client: Optional[VoiceClient] = guild.voice_client
+            if voice_client and voice_client.is_playing():
+                voice_client.stop()
 
-            queue.task_done()
+            data.queue = asyncio.Queue()
+            data.task = None
+            raise e
 
     @classmethod
     async def stop(cls, guild: Guild) -> None:
@@ -71,5 +80,11 @@ class MusicTask:
 
     @classmethod
     async def clear(cls, guild: Guild) -> None:
-        cls.__queues[guild.id] = asyncio.Queue()
+        if (data := cls.__data.get(guild.id)) and (task := data.task):
+            task.cancel()
+            try: await task
+            except asyncio.CancelledError:
+                pass
+
+            data.task = None
         await cls.stop(guild)
