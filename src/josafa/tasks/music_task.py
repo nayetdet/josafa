@@ -57,7 +57,14 @@ class MusicTask:
 
                 ctx, title, thumbnail, url = await queue.get()
                 try:
-                    voice_client.play(discord.FFmpegPCMAudio(url, before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"))
+                    voice_client.play(
+                        discord.FFmpegPCMAudio(
+                            url,
+                            before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+                            options="-filter:a volume=0.1"
+                        )
+                    )
+
                     await cls.display(ctx, title=title, thumbnail=thumbnail, url=url, on_queue=False)
                     while voice_client.is_playing():
                         await asyncio.sleep(1)
